@@ -8,11 +8,13 @@
 struct sso_ticket
 {
     uint8_t publickey[crypto_box_PUBLICKEYBYTES];
+
     char target[TARGET_LENGTH];
     char username[USERNAME_LENGTH];
     char hostname[HOSTNAME_LENGTH];
 
-    struct taia expiry;
+    struct taia issuedtime;
+    struct taia expirytime;
 };
 
 struct sso_request

@@ -204,19 +204,28 @@ int main(int argc, char** argv)
                     continue;
                 }
 
+                printf("Received %d bytes\n", bytes);
+
+                unsigned char session_pk[crypto_box_PUBLICKEYBYTES];
+                unsigned char session_sk[crypto_box_SECRETKEYBYTES];
+
+                char spkhex[crypto_box_PUBLICKEYBYTES * 2 + 1];
+                char sskhex[crypto_box_SECRETKEYBYTES * 2 + 1];
                 char pkhex[crypto_box_PUBLICKEYBYTES * 2 + 1];
+
                 sodium_bin2hex(pkhex, sizeof(pkhex), (const unsigned char*) &packet.publickey, crypto_box_PUBLICKEYBYTES);
                 printf("Packet type 0x%02x (payload length %i) from %s\n", packet.type, packet.length, pkhex);
 
                 switch (packet.type)
                 {
                     case STAGE1_CLIENT_TO_SERVER:
+                    {
                         if (crypto_box_seal_open(
                                 (unsigned char*) &packet.payload,
                                 (const unsigned char*) &packet.payload,
-                                packet.length,
-                                local_pk,
-                                local_sk)
+                                (unsigned long long) packet.length,
+                                (const unsigned char*) local_pk,
+                                (const unsigned char*) local_sk)
                             != 0)
                         {
                             perror("crypto_box_seal_open");
@@ -250,37 +259,26 @@ int main(int argc, char** argv)
                         setreply = redisCommand(c, "EXPIRE realm:%s/session:%s 600", local_realm, pkhex);
                         freeReplyObject(setreply);
 
-                    /*    printf("--- Redis object 'realm:%s/session:%s': ---\n", local_realm, pkhex);
-                        setreply = redisCommand(c,"HGETALL realm:%s/session:%s", local_realm, pkhex);
-                        if (setreply->type == REDIS_REPLY_ARRAY)
-                        {
-                            for (int j = 0; j < setreply->elements; j++)
-                            {
-                                if (j % 2 == 0)
-                                    printf("%s: ", setreply->element[j]->str);
-                                else
-                                    printf("%s\n", setreply->element[j]->str);
-                            }
-                        }
-                        freeReplyObject(setreply); */
-
                         memcpy(responsepacket.payload.ticket.publickey, packet.publickey, crypto_box_PUBLICKEYBYTES);
                         memcpy(responsepacket.payload.ticket.username, packet.payload.s1_c2s.username, USERNAME_LENGTH);
                         memcpy(responsepacket.payload.ticket.hostname, packet.payload.s1_c2s.hostname, HOSTNAME_LENGTH);
 
-                        taia_now(&responsepacket.payload.currenttime);
-                        taia_now(&responsepacket.payload.expirytime);
-                        responsepacket.payload.expirytime.sec += 600;
+                        taia_now(&responsepacket.payload.ticket.issuedtime);
+                        taia_now(&responsepacket.payload.ticket.expirytime);
+                        responsepacket.payload.ticket.expirytime.sec += 600;
+
+                        memcpy(&responsepacket.payload.currenttime, &responsepacket.payload.ticket.issuedtime, sizeof(struct taia));
 
                         responsepacket.type = STAGE1_SERVER_TO_CLIENT;
-                        responsepacket.length = sizeof(struct sso_packet_payload) + crypto_box_MACBYTES;
+                        responsepacket.length = sizeof(struct sso_packet_payload);
                         memcpy(responsepacket.publickey, session_pk, crypto_box_PUBLICKEYBYTES);
                         memset(responsepacket.nonce, 0, crypto_box_NONCEBYTES);
 
-                        if (crypto_box_easy(
+                        if (crypto_box_detached(
                                 (unsigned char*) &responsepacket.payload.ticket,
+                                (unsigned char*) &responsepacket.payload.ticketmac,
                                 (const unsigned char*) &responsepacket.payload.ticket,
-                                sizeof(struct sso_ticket),
+                                (unsigned long long) sizeof(struct sso_ticket),
                                 (const unsigned char*) &responsepacket.nonce,
                                 (const unsigned char*) &local_pk,
                                 (const unsigned char*) &local_sk
@@ -289,10 +287,11 @@ int main(int argc, char** argv)
                             perror("crypto_box_easy(ticket)");
                         }
 
-                        if (crypto_box_easy(
+                        if (crypto_box_detached(
                                 (unsigned char*) &responsepacket.payload,
+                                (unsigned char*) &responsepacket.mac,
                                 (const unsigned char*) &responsepacket.payload,
-                                sizeof(struct sso_packet_payload),
+                                (unsigned long long) responsepacket.length,
                                 (const unsigned char*) &responsepacket.nonce,
                                 (const unsigned char*) &packet.publickey,
                                 (const unsigned char*) &local_sk
@@ -308,10 +307,67 @@ int main(int argc, char** argv)
                         memset(&responsepacket, 0, sizeof(struct sso_packet));
 
                         break;
+                    }
 
                     case STAGE2_CLIENT_TO_SERVER:
-                        printf("Target: %s\n", packet.payload.s2_c2s.target);
+                    {
+                        redisReply* sskreply = redisCommand(c, "HGET realm:%s/session:%s secretkey", local_realm, pkhex);
+                        redisReply* spkreply = redisCommand(c, "HGET realm:%s/session:%s publickey", local_realm, pkhex);
+
+                        if (sskreply->type == REDIS_REPLY_NIL ||
+                            spkreply->type == REDIS_REPLY_NIL)
+                        {
+                            fprintf(stderr, "No session exists for this public key\n");
+                            break;
+                        }
+
+                        sodium_hex2bin(session_sk, crypto_box_SECRETKEYBYTES,
+                                sskreply->str, crypto_box_SECRETKEYBYTES * 2 + 1,
+                                " ", NULL, NULL);
+                        sodium_hex2bin(session_pk, crypto_box_PUBLICKEYBYTES,
+                                spkreply->str, crypto_box_PUBLICKEYBYTES * 2 + 1,
+                                " ", NULL, NULL);
+
+                        freeReplyObject(sskreply);
+                        freeReplyObject(spkreply);
+
+                        if (crypto_box_open_detached(
+                                (unsigned char*) &packet.payload,
+                                (const unsigned char*) &packet.payload,
+                                (const unsigned char*) &packet.mac,
+                                (unsigned long long) packet.length,
+                                (const unsigned char*) &packet.nonce,
+                                (const unsigned char*) &packet.publickey,
+                                (const unsigned char*) &session_sk)
+                            != 0)
+                        {
+                            perror("crypto_box_open_easy");
+                            break;
+                        }
+
+                        printf("Incoming ticket request for target '%s'\n", packet.payload.s2_c2s.target);
+
+                        if (crypto_box_open_detached(
+                                (unsigned char*) &packet.payload.ticket,
+                                (const unsigned char*) &packet.payload.ticket,
+                                (const unsigned char*) &packet.payload.ticketmac,
+                                (unsigned long long) sizeof(struct sso_ticket),
+                                (const unsigned char*) &packet.nonce,
+                                (const unsigned char*) &local_pk,
+                                (const unsigned char*) &local_sk)
+                            != 0)
+                        {
+                            perror("crypto_box_open_easy(ticket)");
+                            break;
+                        }
+
+                        printf("Ticket decrypted\n");
+
+                        memset(&packet, 0, sizeof(struct sso_packet));
+                        memset(&responsepacket, 0, sizeof(struct sso_packet));
+
                         break;
+                    }
 
                     default:
                         fprintf(stderr, "Unexpected packet type %d\n", packet.type);

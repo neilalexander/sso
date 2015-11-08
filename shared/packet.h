@@ -42,8 +42,9 @@ struct sso_packet_s2_s2c
 struct sso_packet_payload
 {
     struct sso_ticket ticket;
+    char ticketmac[crypto_box_MACBYTES];
+
     struct taia currenttime;
-    struct taia expirytime;
 
     union
     {
@@ -59,11 +60,12 @@ struct sso_packet
     enum PACKET_TYPE type;
     char publickey[crypto_box_PUBLICKEYBYTES];
     char nonce[crypto_box_NONCEBYTES];
+    char mac[crypto_box_MACBYTES];
 
     int length;
     struct sso_packet_payload payload;
 
-    char padding[48];
+    char padding[crypto_box_SEALBYTES];
 };
 
 #endif
