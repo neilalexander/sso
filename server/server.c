@@ -236,6 +236,13 @@ int main(int argc, char** argv)
                                 packet.payload.s1_c2s.username,
                                 packet.payload.s1_c2s.password);
 
+                        // TODO:
+                        // - ticket target field is empty check
+                        // - time threshold check
+                        // - expiry time check
+                        // - hostname check
+                        // - user authentication (identity sources?)
+
                         unsigned char session_pk[crypto_box_PUBLICKEYBYTES];
                         unsigned char session_sk[crypto_box_SECRETKEYBYTES];
                         crypto_box_keypair(session_pk, session_sk);
@@ -256,7 +263,7 @@ int main(int argc, char** argv)
                         setreply = redisCommand(c, "HSET realm:%s/session:%s username %s", local_realm, pkhex, packet.payload.s1_c2s.username);
                         freeReplyObject(setreply);
 
-                        setreply = redisCommand(c, "EXPIRE realm:%s/session:%s 600", local_realm, pkhex);
+                        setreply = redisCommand(c, "EXPIRE realm:%s/session:%s %i", local_realm, pkhex, DEFAULT_TICKET_LIFE_SECONDS);
                         freeReplyObject(setreply);
 
                         memcpy(responsepacket.payload.ticket.publickey, packet.publickey, crypto_box_PUBLICKEYBYTES);
@@ -265,7 +272,7 @@ int main(int argc, char** argv)
 
                         taia_now(&responsepacket.payload.ticket.issuedtime);
                         taia_now(&responsepacket.payload.ticket.expirytime);
-                        responsepacket.payload.ticket.expirytime.sec += 600;
+                        responsepacket.payload.ticket.expirytime.sec += DEFAULT_TICKET_LIFE_SECONDS;
 
                         memcpy(&responsepacket.payload.currenttime, &responsepacket.payload.ticket.issuedtime, sizeof(struct taia));
 
@@ -284,7 +291,7 @@ int main(int argc, char** argv)
                                 (const unsigned char*) &local_sk
                             ) != 0)
                         {
-                            perror("crypto_box_easy(ticket)");
+                            perror("crypto_box_detached(ticket)");
                         }
 
                         if (crypto_box_detached(
@@ -297,7 +304,7 @@ int main(int argc, char** argv)
                                 (const unsigned char*) &local_sk
                             ) != 0)
                         {
-                            perror("crypto_box_easy(payload)");
+                            perror("crypto_box_detached(payload)");
                         }
 
                         if (send(sockets[i], &responsepacket, sizeof(struct sso_packet), 0) < 0)
@@ -341,7 +348,7 @@ int main(int argc, char** argv)
                                 (const unsigned char*) &session_sk)
                             != 0)
                         {
-                            perror("crypto_box_open_easy");
+                            perror("crypto_box_open_detached(payload)");
                             break;
                         }
 
@@ -357,11 +364,63 @@ int main(int argc, char** argv)
                                 (const unsigned char*) &local_sk)
                             != 0)
                         {
-                            perror("crypto_box_open_easy(ticket)");
+                            perror("crypto_box_open_detached(ticket)");
                             break;
                         }
 
                         printf("Ticket decrypted\n");
+
+                        // TODO:
+                        // - ticket target field is not empty check
+                        // - application target is known check
+                        // - time threshold check
+                        // - expiry time check
+                        // - hostname check
+
+                        memcpy(responsepacket.payload.ticket.publickey, packet.payload.ticket.publickey, crypto_box_PUBLICKEYBYTES);
+                        memcpy(responsepacket.payload.ticket.username, packet.payload.ticket.username, USERNAME_LENGTH);
+                        memcpy(responsepacket.payload.ticket.hostname, packet.payload.ticket.hostname, HOSTNAME_LENGTH);
+                        memcpy(responsepacket.payload.ticket.target, packet.payload.s2_c2s.target, HOSTNAME_LENGTH);
+
+                        taia_now(&responsepacket.payload.ticket.issuedtime);
+                        taia_now(&responsepacket.payload.ticket.expirytime);
+                        responsepacket.payload.ticket.expirytime.sec += DEFAULT_TICKET_LIFE_SECONDS;
+
+                        memcpy(&responsepacket.payload.currenttime, &responsepacket.payload.ticket.issuedtime, sizeof(struct taia));
+
+                        responsepacket.type = STAGE2_SERVER_TO_CLIENT;
+                        responsepacket.length = sizeof(struct sso_packet_payload);
+                        memcpy(responsepacket.publickey, session_pk, crypto_box_PUBLICKEYBYTES); // TODO: Change to application key
+                        memset(responsepacket.nonce, 0, crypto_box_NONCEBYTES);
+
+                        if (crypto_box_detached(
+                                (unsigned char*) &responsepacket.payload.ticket,
+                                (unsigned char*) &responsepacket.payload.ticketmac,
+                                (const unsigned char*) &responsepacket.payload.ticket,
+                                (unsigned long long) sizeof(struct sso_ticket),
+                                (const unsigned char*) &responsepacket.nonce,
+                                (const unsigned char*) &local_pk, // TODO: Change to application key
+                                (const unsigned char*) &local_sk
+                            ) != 0)
+                        {
+                            perror("crypto_box_detached(ticket)");
+                        }
+
+                        if (crypto_box_detached(
+                                (unsigned char*) &responsepacket.payload,
+                                (unsigned char*) &responsepacket.mac,
+                                (const unsigned char*) &responsepacket.payload,
+                                (unsigned long long) responsepacket.length,
+                                (const unsigned char*) &responsepacket.nonce,
+                                (const unsigned char*) &packet.publickey,
+                                (const unsigned char*) &local_sk
+                            ) != 0)
+                        {
+                            perror("crypto_box_detached(payload)");
+                        }
+
+                        if (send(sockets[i], &responsepacket, sizeof(struct sso_packet), 0) < 0)
+                            perror("send");
 
                         memset(&packet, 0, sizeof(struct sso_packet));
                         memset(&responsepacket, 0, sizeof(struct sso_packet));
