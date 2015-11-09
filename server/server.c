@@ -237,9 +237,6 @@ int main(int argc, char** argv)
                                 packet.payload.s1_c2s.password);
 
                         // TODO:
-                        // - ticket target field is empty check
-                        // - time threshold check
-                        // - expiry time check
                         // - hostname check
                         // - user authentication (identity sources?)
 
@@ -368,13 +365,37 @@ int main(int argc, char** argv)
                             break;
                         }
 
-                        printf("Ticket decrypted\n");
+                        struct taia now;
+                        taia_now(&now);
+
+                        if (now.sec > packet.payload.ticket.expirytime.sec)
+                        {
+                            fprintf(stderr, "Ticket-granting ticket has expired\n");
+                            break;
+                        }
+
+                        if (strcmp((const char*) packet.payload.s2_c2s.target, "") == 0)
+                        {
+                            fprintf(stderr, "No target specified, rejecting\n");
+                            break;
+                        }
+
+                        redisReply* apkreply = redisCommand(c, "HGET realm:%s/application:%s publickey", local_realm, packet.payload.s2_c2s.target);
+
+                        if (apkreply->type == REDIS_REPLY_NIL)
+                        {
+                            fprintf(stderr, "Application is not known or no public key available, rejecting\n");
+                            break;
+                        }
+
+                        char application_pk[crypto_box_PUBLICKEYBYTES];
+                        sodium_hex2bin(session_pk, crypto_box_PUBLICKEYBYTES,
+                                apkreply->str, crypto_box_PUBLICKEYBYTES * 2 + 1,
+                                " ", NULL, NULL);
+
+                        freeReplyObject(apkreply);
 
                         // TODO:
-                        // - ticket target field is not empty check
-                        // - application target is known check
-                        // - time threshold check
-                        // - expiry time check
                         // - hostname check
 
                         memcpy(responsepacket.payload.ticket.publickey, packet.payload.ticket.publickey, crypto_box_PUBLICKEYBYTES);
@@ -399,7 +420,7 @@ int main(int argc, char** argv)
                                 (const unsigned char*) &responsepacket.payload.ticket,
                                 (unsigned long long) sizeof(struct sso_ticket),
                                 (const unsigned char*) &responsepacket.nonce,
-                                (const unsigned char*) &local_pk, // TODO: Change to application key
+                                (const unsigned char*) &application_pk,
                                 (const unsigned char*) &local_sk
                             ) != 0)
                         {
