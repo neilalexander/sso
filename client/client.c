@@ -7,14 +7,17 @@
 #include <pthread.h>
 #include <unistd.h>
 #include <sodium.h>
+#include <sys/un.h>
 
 #include "../shared/types.h"
 #include "../shared/packet.h"
 #include "client.h"
+#include "control.h"
 
 int main(int argc, char** argv)
 {
-    int sd, optval;
+    int usd, sd, optval;
+    struct sockaddr_un control_addr;
     struct sockaddr_in6 serv_addr;
     struct hostent *server;
 
@@ -39,12 +42,57 @@ int main(int argc, char** argv)
     sodium_bin2hex(hex, sizeof(hex), (const unsigned char*) &remote_pk, crypto_box_PUBLICKEYBYTES);
     printf("Remote public key: %s\n", hex);
 
+    if ((usd = socket(AF_UNIX, SOCK_STREAM, 0)) < 0)
+    {
+        fprintf(stderr, "Failed to create control socket: ");
+        perror("socket(AF_UNIX)");
+        exit(-1);
+    }
+
+    control_addr.sun_family = AF_UNIX;
+    strcpy(control_addr.sun_path, "/tmp/sso.sock");
+    unlink(control_addr.sun_path);
+
+    if (bind(usd, (struct sockaddr*) &control_addr, strlen(control_addr.sun_path) + sizeof(control_addr.sun_family)) < 0)
+    {
+        fprintf(stderr, "Failed to bind control socket: ");
+        perror("bind(AF_UNIX)");
+        exit(-1);
+    }
+
     socklen_t addr_size = sizeof(struct sockaddr_in6);
 
     if ((sd = socket(AF_INET6, SOCK_STREAM, 0)) < 0)
     {
-        perror("Failed to create socket");
+        perror("socket(AF_INET6)");
         exit(-1);
+    }
+
+    while (1)
+    {
+        int maxfd = sd > usd ? sd : usd;
+
+        fd_set socketset;
+        FD_ZERO(&socketset);
+        FD_SET(sd, &socketset);
+        FD_SET(usd, &socketset);
+
+        int len = select(maxfd + 1, &socketset, NULL, NULL, 0);
+        if (len < 0)
+        {
+            perror("select");
+            return -1;
+        }
+
+        if (FD_ISSET(usd, &socketset))
+        {
+
+        }
+
+        if (FD_ISSET(sd, &socketset))
+        {
+
+        }
     }
 
     struct sso_packet packet;
@@ -106,7 +154,7 @@ int main(int argc, char** argv)
             (unsigned char*) &packet.payload,
             (const unsigned char*) &packet.payload,
             (const unsigned char*) &packet.mac,
-            (unsigned long long)packet.length,
+            (unsigned long long) packet.length,
             (const unsigned char*) &packet.nonce,
             (const unsigned char*) remote_pk,
             (const unsigned char*) local_sk)
